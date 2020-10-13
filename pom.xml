@@ -390,6 +390,8 @@
                         <optimize>true</optimize>
                         <showDeprecation>true</showDeprecation>
                         <showWarnings>true</showWarnings>
+                        <meminitial>2048m</meminitial>
+                        <maxmem>4096m</maxmem>
                     </configuration>
                 </plugin>
                 <plugin>
