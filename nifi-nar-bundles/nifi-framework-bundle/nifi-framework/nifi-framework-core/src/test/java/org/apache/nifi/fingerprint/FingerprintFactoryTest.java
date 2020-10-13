@@ -28,11 +28,14 @@ import static org.mockito.Mockito.when;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Optional;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.validation.Schema;
 import javax.xml.validation.SchemaFactory;
@@ -48,9 +51,13 @@ import org.apache.nifi.encrypt.StringEncryptor;
 import org.apache.nifi.groups.RemoteProcessGroup;
 import org.apache.nifi.nar.ExtensionManager;
 import org.apache.nifi.nar.StandardExtensionDiscoveringManager;
+import org.apache.nifi.properties.NiFiPropertiesLoader;
 import org.apache.nifi.remote.RemoteGroupPort;
 import org.apache.nifi.remote.protocol.SiteToSiteTransportProtocol;
 import org.apache.nifi.security.util.crypto.Argon2SecureHasher;
+import org.apache.nifi.security.xml.XmlUtils;
+import org.apache.nifi.util.NiFiProperties;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Test;
 import org.w3c.dom.Document;
@@ -67,11 +74,21 @@ public class FingerprintFactoryTest {
     private ExtensionManager extensionManager;
     private FingerprintFactory fingerprinter;
 
+    private static final String ORIGINAL_NIFI_PROPS_PATH = System.getProperty(NiFiProperties.PROPERTIES_FILE_PATH);
+    private static final String TEST_NIFI_PROPS_PATH = "src/test/resources/conf/nifi.properties";
+
     @Before
     public void setup() {
         encryptor = new StringEncryptor("PBEWITHMD5AND256BITAES-CBC-OPENSSL", "BC", "nififtw!");
         extensionManager = new StandardExtensionDiscoveringManager();
         fingerprinter = new FingerprintFactory(encryptor, extensionManager);
+    }
+
+    @AfterClass
+    public static void tearDownOnce() {
+        if (ORIGINAL_NIFI_PROPS_PATH != null) {
+            System.setProperty(NiFiProperties.PROPERTIES_FILE_PATH, ORIGINAL_NIFI_PROPS_PATH);
+        }
     }
 
     @Test
@@ -146,8 +163,6 @@ public class FingerprintFactoryTest {
     }
 
     private DocumentBuilder getValidatingDocumentBuilder() {
-        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
-        documentBuilderFactory.setNamespaceAware(true);
         final SchemaFactory schemaFactory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
         final Schema schema;
         try {
@@ -156,8 +171,7 @@ public class FingerprintFactoryTest {
             throw new RuntimeException("Failed to parse schema for file flow configuration.", e);
         }
         try {
-            documentBuilderFactory.setSchema(schema);
-            DocumentBuilder docBuilder = documentBuilderFactory.newDocumentBuilder();
+            DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(schema, true);
             docBuilder.setErrorHandler(new ErrorHandler() {
                 @Override
                 public void warning(SAXParseException e) throws SAXException {
@@ -182,9 +196,7 @@ public class FingerprintFactoryTest {
 
     private <T> Element serializeElement(final StringEncryptor encryptor, final Class<T> componentClass, final T component,
                                          final String serializerMethodName, ScheduledStateLookup scheduledStateLookup) throws Exception {
-
-        final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
-        final DocumentBuilder docBuilder = docFactory.newDocumentBuilder();
+        final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(false);
         final Document doc = docBuilder.newDocument();
 
         final FlowSerializer flowSerializer = new StandardFlowSerializer(encryptor);
@@ -267,8 +279,22 @@ public class FingerprintFactoryTest {
         when(component.getProxyPassword()).thenReturn(proxyPassword);
         when(component.getVersionedComponentId()).thenReturn(Optional.empty());
 
+        // Build the same secure hasher to derive the HMAC key
+        Argon2SecureHasher a2sh = new Argon2SecureHasher();
+
+        // The nifi.properties file needs to be present
+        System.setProperty(NiFiProperties.PROPERTIES_FILE_PATH, TEST_NIFI_PROPS_PATH);
+        String npsk = NiFiPropertiesLoader.loadDefaultWithKeyFromBootstrap().getProperty(NiFiProperties.SENSITIVE_PROPS_KEY);
+
+        // The output will be 32B (256b)
+        byte[] sensitivePropertyKeyBytes = a2sh.hashRaw(npsk.getBytes(StandardCharsets.UTF_8));
+
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(sensitivePropertyKeyBytes, "HmacSHA256"));
+        byte[] hashedBytes = mac.doFinal(proxyPassword.getBytes(StandardCharsets.UTF_8));
+        final String hashedProxyPassword = "[MASKED] (" + Base64.getEncoder().encodeToString(hashedBytes) + ")";
+
         // Assert fingerprints with expected one.
-        final String hashedProxyPassword = "[MASKED] (" + new Argon2SecureHasher().hashBase64(proxyPassword) + ")";
         final String expected = "id" +
                 "NO_VALUE" +
                 "http://node1:8080/nifi, http://node2:8080/nifi" +
@@ -331,8 +357,7 @@ public class FingerprintFactoryTest {
 
     @Test
     public void testControllerServicesIncludedInGroupFingerprint() throws ParserConfigurationException, IOException, SAXException {
-        final DocumentBuilderFactory docBuilderFactory = DocumentBuilderFactory.newInstance();
-        final DocumentBuilder docBuilder = docBuilderFactory.newDocumentBuilder();
+        final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(false);
         final Document document = docBuilder.parse(new File("src/test/resources/nifi/fingerprint/group-with-controller-services.xml"));
         final Element processGroup = document.getDocumentElement();
 

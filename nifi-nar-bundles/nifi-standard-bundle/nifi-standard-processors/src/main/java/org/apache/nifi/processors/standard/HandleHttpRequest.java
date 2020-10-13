@@ -94,7 +94,8 @@ import java.util.regex.Pattern;
 @InputRequirement(Requirement.INPUT_FORBIDDEN)
 @Tags({"http", "https", "request", "listen", "ingress", "web service"})
 @CapabilityDescription("Starts an HTTP Server and listens for HTTP Requests. For each request, creates a FlowFile and transfers to 'success'. "
-        + "This Processor is designed to be used in conjunction with the HandleHttpResponse Processor in order to create a Web Service")
+        + "This Processor is designed to be used in conjunction with the HandleHttpResponse Processor in order to create a Web Service. In case "
+        + " of a multipart request, one FlowFile is generated for each part.")
 @WritesAttributes({
     @WritesAttribute(attribute = HTTPUtils.HTTP_CONTEXT_ID, description = "An identifier that allows the HandleHttpRequest and HandleHttpResponse "
             + "to coordinate which FlowFile belongs to which HTTP Request/Response."),
@@ -131,7 +132,8 @@ import java.util.regex.Pattern;
     @WritesAttribute(attribute = "http.multipart.name",
         description = "For requests with Content-Type \"multipart/form-data\", the part's name is recorded into this attribute"),
     @WritesAttribute(attribute = "http.multipart.filename",
-        description = "For requests with Content-Type \"multipart/form-data\", when the part contains an uploaded file, the name of the file is recorded into this attribute"),
+        description = "For requests with Content-Type \"multipart/form-data\", when the part contains an uploaded file, the name of the file is recorded into this attribute. "
+                    + "Files are stored temporarily at the default temporary-file directory specified in \"java.io.File\" Java Docs)"),
     @WritesAttribute(attribute = "http.multipart.fragments.sequence.number",
         description = "For requests with Content-Type \"multipart/form-data\", the part's index is recorded into this attribute. The index starts with 1."),
     @WritesAttribute(attribute = "http.multipart.fragments.total.number",
@@ -518,17 +520,12 @@ public class HandleHttpRequest extends AbstractProcessor {
     }
 
     private SslContextFactory createSslFactory(final SSLContextService sslService, final boolean needClientAuth, final boolean wantClientAuth) {
-        final SslContextFactory sslFactory = new SslContextFactory();
+        final SslContextFactory sslFactory = new SslContextFactory.Server();
 
         sslFactory.setNeedClientAuth(needClientAuth);
         sslFactory.setWantClientAuth(wantClientAuth);
 
         sslFactory.setProtocol(sslService.getSslAlgorithm());
-
-        // Need to set SslContextFactory's endpointIdentificationAlgorithm to null; this is a server,
-        // not a client.  Server does not need to perform hostname verification on the client.
-        // Previous to Jetty 9.4.15.v20190215, this defaulted to null.
-        sslFactory.setEndpointIdentificationAlgorithm(null);
 
         if (sslService.isKeyStoreConfigured()) {
             sslFactory.setKeyStorePath(sslService.getKeyStoreFile());

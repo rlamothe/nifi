@@ -73,8 +73,8 @@ import org.apache.nifi.nar.NarLoader;
 import org.apache.nifi.nar.StandardExtensionDiscoveringManager;
 import org.apache.nifi.nar.StandardNarLoader;
 import org.apache.nifi.processor.DataUnit;
-import org.apache.nifi.security.util.CertificateUtils;
 import org.apache.nifi.security.util.KeyStoreUtils;
+import org.apache.nifi.security.util.TlsConfiguration;
 import org.apache.nifi.services.FlowService;
 import org.apache.nifi.ui.extension.UiExtension;
 import org.apache.nifi.ui.extension.UiExtensionMapping;
@@ -132,16 +132,13 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
     private static final String CONTAINER_INCLUDE_PATTERN_KEY = "org.eclipse.jetty.server.webapp.ContainerIncludeJarPattern";
     private static final String CONTAINER_INCLUDE_PATTERN_VALUE = ".*/[^/]*servlet-api-[^/]*\\.jar$|.*/javax.servlet.jsp.jstl-.*\\\\.jar$|.*/[^/]*taglibs.*\\.jar$";
 
-    private static final FileFilter WAR_FILTER = new FileFilter() {
-        @Override
-        public boolean accept(File pathname) {
-            final String nameToTest = pathname.getName().toLowerCase();
-            return nameToTest.endsWith(".war") && pathname.isFile();
-        }
+    private static final FileFilter WAR_FILTER = pathname -> {
+        final String nameToTest = pathname.getName().toLowerCase();
+        return nameToTest.endsWith(".war") && pathname.isFile();
     };
 
-    private final Server server;
-    private final NiFiProperties props;
+    private Server server;
+    private NiFiProperties props;
 
     private Bundle systemBundle;
     private Set<Bundle> bundles;
@@ -162,13 +159,18 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
 
     private DeploymentManager deploymentManager;
 
-    public JettyServer(final NiFiProperties props, final Set<Bundle> bundles) {
+    /**
+     * Default no-arg constructor for ServiceLoader
+     */
+    public JettyServer() {
+    }
+
+    public void init() {
         final QueuedThreadPool threadPool = new QueuedThreadPool(props.getWebThreads());
         threadPool.setName("NiFi Web Server");
 
         // create the server
         this.server = new Server(threadPool);
-        this.props = props;
 
         // enable the annotation based configuration to ensure the jsp container is initialized properly
         final Configuration.ClassList classlist = Configuration.ClassList.setServerDefault(server);
@@ -266,7 +268,7 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
 
         final HandlerCollection webAppContextHandlers = new HandlerCollection();
         final Collection<WebAppContext> extensionUiContexts = extensionUiInfo.getWebAppContexts();
-        extensionUiContexts.stream().forEach(c -> webAppContextHandlers.addHandler(c));
+        extensionUiContexts.forEach(webAppContextHandlers::addHandler);
 
         final ClassLoader frameworkClassLoader = getClass().getClassLoader();
 
@@ -975,20 +977,14 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
     }
 
     private SslContextFactory createSslContextFactory() {
-        final SslContextFactory contextFactory = new SslContextFactory();
-        configureSslContextFactory(contextFactory, props);
-        return contextFactory;
+        final SslContextFactory.Server serverContextFactory = new SslContextFactory.Server();
+        configureSslContextFactory(serverContextFactory, props);
+        return serverContextFactory;
     }
 
-    protected static void configureSslContextFactory(SslContextFactory contextFactory, NiFiProperties props) {
-        // Need to set SslContextFactory's endpointIdentificationAlgorithm to null; this is a server,
-        // not a client.  Server does not need to perform hostname verification on the client.
-        // Previous to Jetty 9.4.15.v20190215, this defaulted to null, and now defaults to "HTTPS".
-        contextFactory.setEndpointIdentificationAlgorithm(null);
-
+    protected static void configureSslContextFactory(SslContextFactory.Server contextFactory, NiFiProperties props) {
         // Explicitly exclude legacy TLS protocol versions
-        // contextFactory.setProtocol(CertificateUtils.getHighestCurrentSupportedTlsProtocolVersion());
-        contextFactory.setIncludeProtocols(CertificateUtils.getCurrentSupportedTlsProtocolVersions());
+        contextFactory.setIncludeProtocols(TlsConfiguration.getCurrentSupportedTlsProtocolVersions());
         contextFactory.setExcludeProtocols("TLS", "TLSv1", "TLSv1.1", "SSL", "SSLv2", "SSLv2Hello", "SSLv3");
 
         // require client auth when not supporting login, Kerberos service, or anonymous access
@@ -1261,14 +1257,13 @@ public class JettyServer implements NiFiServer, ExtensionUiLoader {
     }
 
     @Override
-    public void setExtensionMapping(ExtensionMapping extensionMapping) {
-        this.extensionMapping = extensionMapping;
-    }
-
-    @Override
-    public void setBundles(Bundle systemBundle, Set<Bundle> bundles) {
+    public void initialize(NiFiProperties properties, Bundle systemBundle, Set<Bundle> bundles, ExtensionMapping extensionMapping) {
+        this.props = properties;
         this.systemBundle = systemBundle;
         this.bundles = bundles;
+        this.extensionMapping = extensionMapping;
+
+        init();
     }
 
     @Override

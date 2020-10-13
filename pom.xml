@@ -18,13 +18,14 @@
     </parent>
     <groupId>org.apache.nifi</groupId>
     <artifactId>nifi</artifactId>
-    <version>1.12.0-SNAPSHOT</version>
+    <version>1.13.0-SNAPSHOT</version>
     <packaging>pom</packaging>
     <description>Apache NiFi is an easy to use, powerful, and reliable system to process and distribute data.</description>
     <modules>
         <module>nifi-commons</module>
         <module>nifi-api</module>
         <module>nifi-framework-api</module>
+        <module>nifi-server-api</module>
         <module>nifi-bootstrap</module>
         <module>nifi-mock</module>
         <module>nifi-nar-bundles</module>
@@ -88,16 +89,18 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <inceptionYear>2014</inceptionYear>
         <org.slf4j.version>1.7.30</org.slf4j.version>
-        <ranger.version>2.0.0</ranger.version>
+        <ranger.version>2.1.0</ranger.version>
         <jetty.version>9.4.26.v20200117</jetty.version>
         <jackson.version>2.9.10</jackson.version>
         <jackson-databind.version>2.9.10.5</jackson-databind.version>
-        <nifi.registry.version>0.5.0</nifi.registry.version>
+        <nifi.registry.version>0.7.0</nifi.registry.version>
         <nifi.groovy.version>2.5.4</nifi.groovy.version>
         <surefire.version>2.22.2</surefire.version>
         <!-- The Hadoop version used by nifi-hadoop-libraries-nar and any NARs that depend on it, other NARs that need
             a specific version should override this property, or use a more specific property like abc.hadoop.version -->
         <hadoop.version>3.2.1</hadoop.version>
+        <ozone.version>1.0.0</ozone.version>
+        <gcs.version>2.1.5</gcs.version>
     </properties>
 
     <repositories>
@@ -257,7 +260,7 @@
             <dependency>
                 <groupId>junit</groupId>
                 <artifactId>junit</artifactId>
-                <version>4.13</version>
+                <version>4.13.1</version>
             </dependency>
             <dependency>
                 <groupId>org.mockito</groupId>

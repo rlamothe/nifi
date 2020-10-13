@@ -368,10 +368,11 @@ To enable authentication via OpenId Connect the following properties must be con
 |`nifi.security.user.oidc.client.id` | The client id for NiFi after registration with the OpenId Connect Provider.
 |`nifi.security.user.oidc.client.secret` | The client secret for NiFi after registration with the OpenId Connect Provider.
 |`nifi.security.user.oidc.preferred.jwsalgorithm` | The preferred algorithm for validating identity tokens. If this value is blank, it will default to `RS256` which is required to be supported
-|`nifi.security.user.oidc.additional.scopes` | Comma separated scopes that are sent to OpenId Connect Provider in addition to `openid` and `email`.
-|`nifi.security.user.oidc.claim.identifying.user` | Claim that identifies the user to be logged in; default is `email`. May need to be requested via the `nifi.security.user.oidc.additional.scopes` before usage by the OpenId Connect Provider according to the specification. If this value is `HS256`, `HS384`, or `HS512`, NiFi will attempt to validate HMAC protected tokens using the specified client secret.
+by the OpenId Connect Provider according to the specification. If this value is `HS256`, `HS384`, or `HS512`, NiFi will attempt to validate HMAC protected tokens using the specified client secret.
 If this value is `none`, NiFi will attempt to validate unsecured/plain tokens. Other values for this algorithm will attempt to parse as an RSA or EC algorithm to be used in conjunction with the
 JSON Web Key (JWK) provided through the jwks_uri in the metadata found at the discovery URL.
+|`nifi.security.user.oidc.additional.scopes` | Comma separated scopes that are sent to OpenId Connect Provider in addition to `openid` and `email`.
+|`nifi.security.user.oidc.claim.identifying.user` | Claim that identifies the user to be logged in; default is `email`. May need to be requested via the `nifi.security.user.oidc.additional.scopes` before usage.
 |==================================================================================================================================================
 
 [[apache_knox]]
@@ -1381,43 +1382,70 @@ The EncryptContent processor allows for the encryption and decryption of data, b
 
 Key Derivation Functions (KDF) are mechanisms by which human-readable information, usually a password or other secret information, is translated into a cryptographic key suitable for data protection. For further information, read the link:https://en.wikipedia.org/wiki/Key_derivation_function[Wikipedia entry on Key Derivation Functions^].
 Currently, KDFs are ingested by `CipherProvider` implementations and return a fully-initialized `Cipher` object to be used for encryption or decryption. Due to the use of a `CipherProviderFactory`, the KDFs are not customizable at this time. Future enhancements will include the ability to provide custom cost parameters to the KDF at initialization time. As a work-around, `CipherProvider` instances can be initialized with custom cost parameters in the constructor but this is not currently supported by the `CipherProviderFactory`.
+If you do not have a need for a specific KDF, *Argon2 is recommended* as it is a robust, secure, performant, and user-friendly default and is widely supported on multiple platforms.
 Here are the KDFs currently supported by NiFi (primarily in the `EncryptContent` processor for password-based encryption (PBE)) and relevant notes:
 
-* NiFi Legacy KDF
-** The original KDF used by NiFi for internal key derivation for PBE, this is 1000 iterations of the MD5 digest over the concatenation of the password and 8 or 16 bytes of random salt (the salt length depends on the selected cipher block size).
-** This KDF is *deprecated as of NiFi 0.5.0* and should only be used for backwards compatibility to decrypt data that was previously encrypted by a legacy version of NiFi.
-* OpenSSL PKCS#5 v1.5 EVP_BytesToKey
-** This KDF was added in v0.4.0.
-** This KDF is provided for compatibility with data encrypted using OpenSSL's default PBE, known as `EVP_BytesToKey`. This is a single iteration of MD5 over the concatenation of the password and 8 bytes of random ASCII salt. OpenSSL recommends using `PBKDF2` for key derivation but does not expose the library method necessary to the command-line tool, so this KDF is still the de facto default for command-line encryption.
-* Bcrypt
-** This KDF was added in v0.5.0.
-** link:https://en.wikipedia.org/wiki/Bcrypt[Bcrypt^] is an adaptive function based on the link:https://en.wikipedia.org/wiki/Blowfish_(cipher)[Blowfish^] cipher. This KDF is strongly recommended as it automatically incorporates a random 16 byte salt, configurable cost parameter (or "work factor"), and is hardened against brute-force attacks using link:https://en.wikipedia.org/wiki/General-purpose_computing_on_graphics_processing_units[GPGPU^] (which share memory between cores) by requiring access to "large" blocks of memory during the key derivation. It is less resistant to link:https://en.wikipedia.org/wiki/Field-programmable_gate_array[FPGA^] brute-force attacks where the gate arrays have access to individual embedded RAM blocks.
-** Because the length of a Bcrypt-derived key is always 184 bits, the complete output is then fed to a `SHA-512` digest and truncated to the desired key length. This provides the benefit of the avalanche effect on the formatted input.
-** The recommended minimum work factor is 12 (2^12^ key derivation rounds) (as of 2/1/2016 on commodity hardware) and should be increased to the threshold at which legitimate systems will encounter detrimental delays (see schedule below or use `BcryptCipherProviderGroovyTest#testDefaultConstructorShouldProvideStrongWorkFactor()` to calculate safe minimums).
-** The salt format is `$2a$10$ABCDEFGHIJKLMNOPQRSTUV`. The salt is delimited by `$` and the three sections are as follows:
-*** `2a` - the version of the format. An extensive explanation can be found link:http://blog.ircmaxell.com/2012/12/seven-ways-to-screw-up-bcrypt.html[here^]. NiFi currently uses `2a` for all salts generated internally.
-*** `10` - the work factor. This is actually the log~2~ value, so the total iteration count would be 2^10^ in this case.
-*** `ABCDEFGHIJKLMNOPQRSTUV` - the 22 character, Base64-encoded, unpadded, raw salt value. This decodes to a 16 byte salt used in the key derivation.
-* Scrypt
-** This KDF was added in v0.5.0.
-** link:https://en.wikipedia.org/wiki/Scrypt[Scrypt^] is an adaptive function designed in response to `bcrypt`. This KDF is recommended as it requires relatively large amounts of memory for each derivation, making it resistant to hardware brute-force attacks.
-** The recommended minimum cost is `N`=2^14^, `r`=8, `p`=1 (as of 2/1/2016 on commodity hardware). `p` must be a positive integer and less than `(2^32 − 1) * (Hlen/MFlen)` where `Hlen` is the length in octets of the digest function output (32 for SHA-256) and `MFlen` is the length in octets of the mixing function output, defined as `r * 128`. These parameters should be increased to the threshold at which legitimate systems will encounter detrimental delays (see schedule below or use `ScryptCipherProviderGroovyTest#testDefaultConstructorShouldProvideStrongParameters()` to calculate safe minimums).
-** The salt format is `$s0$e0101$ABCDEFGHIJKLMNOPQRSTUV`. The salt is delimited by `$` and the three sections are as follows:
-*** `s0` - the version of the format. NiFi currently uses `s0` for all salts generated internally.
-*** `e0101` - the cost parameters. This is actually a hexadecimal encoding of `N`, `r`, `p` using shifts. This can be formed/parsed using `Scrypt#encodeParams()` and `Scrypt#parseParameters()`.
-**** Some external libraries encode `N`, `r`, and `p` separately in the form `$400$1$1$`. A utility method is available at `ScryptCipherProvider#translateSalt()` which will convert the external form to the internal form.
-*** `ABCDEFGHIJKLMNOPQRSTUV` - the 12-44 character, Base64-encoded, unpadded, raw salt value. This decodes to a 8-32 byte salt used in the key derivation.
-* PBKDF2
-** This KDF was added in v0.5.0.
-** link:https://en.wikipedia.org/wiki/PBKDF2[Password-Based Key Derivation Function 2^] is an adaptive derivation function which uses an internal pseudorandom function (PRF) and iterates it many times over a password and salt (at least 16 bytes).
-** The PRF is recommended to be `HMAC/SHA-256` or `HMAC/SHA-512`. The use of an HMAC cryptographic hash function mitigates a length extension attack.
-** The recommended minimum number of iterations is 160,000 (as of 2/1/2016 on commodity hardware). This number should be doubled every two years (see schedule below or use `PBKDF2CipherProviderGroovyTest#testDefaultConstructorShouldProvideStrongIterationCount()` to calculate safe minimums).
-** This KDF is not memory-hard (can be parallelized massively with commodity hardware) but is still recommended as sufficient by http://csrc.nist.gov/publications/nistpubs/800-132/nist-sp800-132.pdf[NIST SP 800-132 (PDF)] and many cryptographers (when used with a proper iteration count and HMAC cryptographic hash function).
-* None
-** This KDF was added in v0.5.0.
-** This KDF performs no operation on the input and is a marker to indicate the raw key is provided to the cipher. The key must be provided in hexadecimal encoding and be of a valid length for the associated cipher/algorithm.
+[[nifi-legacy-kdf]]
+==== NiFi Legacy KDF
+* The original KDF used by NiFi for internal key derivation for PBE, this is 1000 iterations of the MD5 digest over the concatenation of the password and 8 or 16 bytes of random salt (the salt length depends on the selected cipher block size).
+* This KDF is *deprecated as of NiFi 0.5.0* and should only be used for backwards compatibility to decrypt data that was previously encrypted by a legacy version of NiFi.
 
-==== Additional Resources
+[[openssl-pkcs5-evp-bytestokey]]
+==== OpenSSL PKCS#5 v1.5 EVP_BytesToKey
+* This KDF was added in v0.4.0.
+* This KDF is provided for compatibility with data encrypted using OpenSSL's default PBE, known as `EVP_BytesToKey`. This is a single iteration of MD5 over the concatenation of the password and 8 bytes of random ASCII salt. OpenSSL recommends using `PBKDF2` for key derivation but does not expose the library method necessary to the command-line tool, so this KDF is still the de facto default for command-line encryption.
+
+[[bcrypt-kdf]]
+==== Bcrypt
+* This KDF was added in v0.5.0.
+* link:https://en.wikipedia.org/wiki/Bcrypt[Bcrypt^] is an adaptive function based on the link:https://en.wikipedia.org/wiki/Blowfish_(cipher)[Blowfish^] cipher. This KDF is recommended as it automatically incorporates a random 16 byte salt, configurable cost parameter (or "work factor"), and is hardened against brute-force attacks using link:https://en.wikipedia.org/wiki/General-purpose_computing_on_graphics_processing_units[GPGPU^] (which share memory between cores) by requiring access to "large" blocks of memory during the key derivation. It is less resistant to link:https://en.wikipedia.org/wiki/Field-programmable_gate_array[FPGA^] brute-force attacks where the gate arrays have access to individual embedded RAM blocks.
+* Because the length of a Bcrypt-derived hash is always 184 bits, the hash output (not including the algorithm, work factor, or salt) is then fed to a `SHA-512` digest and truncated to the desired key length. This provides the benefit of the avalanche effect over the input. This key stretching mechanism was introduced in Apache NiFi 1.12.0.
++
+NOTE: Prior to this, the _complete output_ (algorithm, work factor, salt, and hash output for a total of 480 bits) was provided to the SHA-512 digest function. NiFi can transparently handle decrypting data (under 10 MiB) encrypted using a key derived via this legacy process.
+* The recommended minimum work factor is 12 (2^12^ key derivation rounds) (as of 2/1/2016 on commodity hardware) and should be increased to the threshold at which legitimate systems will encounter detrimental delays (see schedule below or use `BcryptCipherProviderGroovyTest#testDefaultConstructorShouldProvideStrongWorkFactor()` to calculate safe minimums).
+* The salt format is `$2a$10$ABCDEFGHIJKLMNOPQRSTUV`. The salt is delimited by `$` and the three sections are as follows:
+** `2a` - the version of the format. An extensive explanation can be found link:http://blog.ircmaxell.com/2012/12/seven-ways-to-screw-up-bcrypt.html[here^]. NiFi currently uses `2a` for all salts generated internally.
+** `10` - the work factor. This is actually the log~2~ value, so the total iteration count would be 2^10^ (1024) in this case.
+** `ABCDEFGHIJKLMNOPQRSTUV` - the 22 character, Radix64-encoded, unpadded, raw salt value. This decodes to a 16 byte salt used in the key derivation.
++
+NOTE: The Bcrypt Radix64 encoding is *not* compatible with standard MIME Base64 encoding.
+
+[[scrypt-kdf]]
+==== Scrypt
+* This KDF was added in v0.5.0.
+* link:https://en.wikipedia.org/wiki/Scrypt[Scrypt^] is an adaptive function designed in response to `bcrypt`. This KDF is recommended as it requires relatively large amounts of memory for each derivation, making it resistant to hardware brute-force attacks.
+* The recommended minimum cost is `N`=2^14^ (16,384), `r`=8, `p`=1 (as of 2/1/2016 on commodity hardware). `p` must be a positive integer and less than `(2^32 − 1) * (Hlen/MFlen)` where `Hlen` is the length in octets of the digest function output (32 for SHA-256) and `MFlen` is the length in octets of the mixing function output, defined as `r * 128`. These parameters should be increased to the threshold at which legitimate systems will encounter detrimental delays (see schedule below or use `ScryptCipherProviderGroovyTest#testDefaultConstructorShouldProvideStrongParameters()` to calculate safe minimums).
+* The salt format is `$s0$e0101$ABCDEFGHIJKLMNOPQRSTUV`. The salt is delimited by `$` and the three sections are as follows:
+** `s0` - the version of the format. NiFi currently uses `s0` for all salts generated internally.
+** `e0101` - the cost parameters. This is actually a hexadecimal encoding of `N`, `r`, `p` using shifts. This can be formed/parsed using `Scrypt#encodeParams()` and `Scrypt#parseParameters()`.
+*** Some external libraries encode `N`, `r`, and `p` separately in the form `$4000$1$1$` (`N` is stored in hex encoding as `0x4000`, which is `0d16384`, or 2^14^ as `0xe` = `0d14`). A utility method is available at `ScryptCipherProvider#translateSalt()` which will convert the external form to the internal form.
+** `ABCDEFGHIJKLMNOPQRSTUV` - the 12-44 character, Base64-encoded, unpadded, raw salt value. This decodes to a 8-32 byte salt used in the key derivation.
+
+[[pbkdf2-kdf]]
+==== PBKDF2
+* This KDF was added in v0.5.0.
+* link:https://en.wikipedia.org/wiki/PBKDF2[Password-Based Key Derivation Function 2^] is an adaptive derivation function which uses an internal pseudorandom function (PRF) and iterates it many times over a password and salt (at least 16 bytes).
+* The PRF is recommended to be `HMAC/SHA-256` or `HMAC/SHA-512`. The use of an HMAC cryptographic hash function mitigates a length extension attack.
+* The recommended minimum number of iterations is 160,000 (as of 2/1/2016 on commodity hardware). This number should be doubled every two years (see schedule below or use `PBKDF2CipherProviderGroovyTest#testDefaultConstructorShouldProvideStrongIterationCount()` to calculate safe minimums).
+* This KDF is not memory-hard (can be parallelized massively with commodity hardware) but is still recommended as sufficient by http://csrc.nist.gov/publications/nistpubs/800-132/nist-sp800-132.pdf[NIST SP 800-132 (PDF)^] and many cryptographers (when used with a proper iteration count and HMAC cryptographic hash function).
+
+[[none-kdf]]
+==== None
+* This KDF was added in v0.5.0.
+* This KDF performs no operation on the input and is a marker to indicate the raw key is provided to the cipher. The key must be provided in hexadecimal encoding and be of a valid length for the associated cipher/algorithm.
+
+[[argon2-kdf]]
+==== Argon2
+* This KDF was added in v1.12.0.
+* link:https://en.wikipedia.org/wiki/Argon2[Argon2^] is a key derivation function which won the Password Hashing Competition in 2015. This KDF is recommended as it offers a variety of modes which can be tailored to prevention of GPU attacks, prevention of side-channel attacks, or a combination of both. It allows for a variable output key length.
+* The recommended minimum cost is `memory`=2^16^ (65,536) KiB, `iterations`=5, `parallelism`=8 (as of 4/22/2020 on commodity hardware). The link:https://password-hashing.net/argon2-specs.pdf[Argon2 specification paper (PDF)^] Section 9 describes an algorithm used to determine recommended parameters. These parameters should be increased to the threshold at which legitimate systems will encounter detrimental delays (use `Argon2SecureHasherTest#testDefaultCostParamsShouldBeSufficient()` to calculate safe minimums).
+* The salt format is `$argon2id$v=19$m=65536,t=5,p=8$ABCDEFGHIJKLMNOPQRSTUV`. The salt is delimited by `$` and the four sections are as follows:
+** `argon2id` - the "type" of algorithm (`2i`, `2d`, `2id`). NiFi currently uses `argon2id` for all salts generated internally.
+** `v=19` - the version of the algorithm in decimal (`0d19` = `0x13`). NiFi currently uses `0d19` for all salts generated internally.
+** `m=65536,t=5,p=8` - the cost parameters. This contains the memory, iterations, and parallelism in order.
+** `ABCDEFGHIJKLMNOPQRSTUV` - the 12-44 character, Base64-encoded, unpadded, raw salt value. This decodes to a 8-32 byte salt used in the key derivation.
+
+===== Additional Resources
 
 * link:http://stackoverflow.com/a/30308723/70465[Explanation of optimal scrypt cost parameters and relationships^]
 * link:http://csrc.nist.gov/publications/nistpubs/800-132/nist-sp800-132.pdf[NIST Special Publication 800-132^]
@@ -1452,13 +1480,15 @@ image:openssl-salt.png["OpenSSL Salt Encoding"]
 
 For new KDFs, each of which allow for non-deterministic IVs, the IV must be stored alongside the cipher text. This is not a vulnerability, as the IV is not required to be secret, but simply to be unique for messages encrypted using the same key to reduce the success of cryptographic attacks. For these KDFs, the output consists of the salt, followed by the salt delimiter, UTF-8 string "`NiFiSALT`" (`0x4E 69 46 69 53 41 4C 54`) and then the IV, followed by the IV delimiter, UTF-8 string "`NiFiIV`" (`0x4E 69 46 69 49 56`), followed by the cipher text.
 
-==== Bcrypt, Scrypt, PBKDF2
+==== Bcrypt, Scrypt, PBKDF2, Argon2
 
 image:bcrypt-salt.png["Bcrypt Salt & IV Encoding"]
 
 image:scrypt-salt.png["Scrypt Salt & IV Encoding"]
 
 image:pbkdf2-salt.png["PBKDF2 Salt & IV Encoding"]
+
+image:argon2-salt.png["Argon2 Salt & IV Encoding"]
 
 === Java Cryptography Extension (JCE) Limited Strength Jurisdiction Policies
 
@@ -1551,7 +1581,19 @@ If on a system where the unlimited strength policies cannot be installed, it is 
 If it is not possible to install the unlimited strength jurisdiction policies, the `Allow Weak Crypto` setting can be changed to `allowed`, but *this is _not_ recommended*. Changing this setting explicitly acknowledges the inherent risk in using weak cryptographic configurations.
 =====================
 
-It is preferable to request upstream/downstream systems to switch to link:https://cwiki.apache.org/confluence/display/NIFI/Encryption+Information[keyed encryption^] or use a "strong" link:https://cwiki.apache.org/confluence/display/NIFI/Key+Derivation+Function+Explanations[Key Derivation Function (KDF) supported by NiFi^].
+It is preferable to request upstream/downstream systems to switch to link:https://cwiki.apache.org/confluence/display/NIFI/Encryption+Information[keyed encryption^] or use a "strong" <<key-derivation-functions, Key Derivation Function (KDF) supported by NiFi>>.
+
+[[nifi_sensitive_props_key]]
+== Encrypted Passwords in Flow Definitions
+
+NiFi always stores all sensitive values (passwords, tokens, and other credentials) populated into a flow in an encrypted format on disk. The encryption algorithm used is specified by `nifi.sensitive.props.algorithm` and the password from which the encryption key is derived is specified by `nifi.sensitive.props.key` in _nifi.properties_ (see <<security_configuration,Security Configuration>> for additional information). Prior to version 1.12.0, the list of available algorithms was all password-based encryption (PBE) algorithms supported by the `EncryptionMethod` enum in that version. Unfortunately many of these algorithms are provided for legacy compatibility, and use weak key derivation functions and block cipher algorithms & modes of operation. In 1.12.0, a pair of custom algorithms was introduced for security-conscious users looking for more robust protection of the flow sensitive values. These options combine the <<argon2-kdf, Argon2id>> KDF with reasonable cost parameters (2^16^ or `65,536 KB` of memory, `5` iterations, and parallelism `8`) with an authenticated encryption with associated data (AEAD) mode of operation, `AES-G/CM` (Galois Counter Mode). The algorithms are specified as:
+
+* `NIFI_ARGON2_AES_GCM_256` -- 256-bit key length
+* `NIFI_ARGON2_AES_GCM_128` -- 128-bit key length
+
+Both options require a password (`nifi.sensitive.props.key` value) of *at least 12 characters*. This means the "default" value (if left empty, a hard-coded default is used) will not be sufficient.
+
+These options provide a bridge solution to higher security without requiring a change to the structure of _nifi.properties_. A more full-featured configuration process, allowing for arbitrary combinations of KDFs and encryption algorithms, will be added in a future release. See link:https://issues.apache.org/jira/browse/NIFI-7668[NIFI-7668^] and link:https://issues.apache.org/jira/browse/NIFI-7670[NIFI-7670^] for more details.
 
 [[encrypt-config_tool]]
 == Encrypted Passwords in Configuration Files
@@ -1587,7 +1629,7 @@ image::zero-leader-cluster-http-access.png["NiFi Cluster HTTP Access"]
 
 === Zero-Leader Clustering
 NiFi employs a Zero-Leader Clustering paradigm. Each node in the cluster has an identical flow definition and performs the same tasks on
-the data, but each operates on a different set of data. The cluster automatically distributes the data throughout all the active nodes. 
+the data, but each operates on a different set of data. The cluster automatically distributes the data throughout all the active nodes.
 
 One of the nodes is automatically elected (via Apache
 ZooKeeper) as the Cluster Coordinator. All nodes in the cluster will then send heartbeat/status information
@@ -1723,7 +1765,7 @@ some amount of time has elapsed (configured by setting the `nifi.cluster.flow.el
 some number of Nodes have cast votes (configured by setting the `nifi.cluster.flow.election.max.candidates` property),
 a flow is elected to be the "correct" copy of the flow.
 
-Any node whose dataflow, users, groups, and policies conflict the with those elected will backup any conflicting resources and replace the local
+Any node whose dataflow, users, groups, and policies conflict with those elected will backup any conflicting resources and replace the local
 resources with those from the cluster. How the backup is performed depends on the configured Access Policy Provider and User Group Provider.
 For file-based access policy providers, the backup will be written to the same directory as the existing file (e.g., $NIFI_HOME/conf) and bear the same
 name but with a suffix of "." and a timestamp. For example, if the flow itself conflicts with the cluster's flow at 12:05:03 on January 1, 2020,
@@ -2174,7 +2216,7 @@ take effect only after NiFi has been stopped and restarted.
                            if the service is still running, the Bootstrap will `kill` the process, or terminate it abruptly.
 |`java.arg.N`|Any number of JVM arguments can be passed to the NiFi JVM when the process is started. These arguments are defined by adding properties to _bootstrap.conf_ that
             begin with `java.arg.`. The rest of the property name is not relevant, other than to differentiate property names, and will be ignored. The default includes
-            properties for minimum and maximum Java Heap size, the garbage collector to use, etc.
+            properties for minimum and maximum Java Heap size, the garbage collector to use, Java IO temporary directory, etc.
 |`nifi.bootstrap.sensitive.key`|The root key (in hexadecimal format) for encrypted sensitive configuration values. When NiFi is started, this root key is used to decrypt sensitive values from the _nifi.properties_ file into memory for later use.
 
 The Encrypt-Config Tool can be used to specify the root key, encrypt sensitive values in _nifi.properties_ and update _bootstrap.conf_. See the <<toolkit-guide.adoc#encrypt_config_tool,NiFi Toolkit Guide>> for an example.
@@ -2554,7 +2596,6 @@ To do so, set the value of this property to `org.wali.MinimalLockingWriteAheadLo
 If the value of this property is changed, upon restart, NiFi will still recover the records written using the previously configured repository and delete the files written by the previously configured
 implementation.
 |`nifi.flowfile.repository.directory`*|The location of the FlowFile Repository. The default value is `./flowfile_repository`.
-|`nifi.flowfile.repository.partitions`|The number of partitions. The default value is `256`.
 |`nifi.flowfile.repository.checkpoint.interval`| The FlowFile Repository checkpoint interval. The default value is `2 mins`.
 |`nifi.flowfile.repository.always.sync`|If set to `true`, any change to the repository will be synchronized to the disk, meaning that NiFi will ask the operating system not to cache the information. This is very expensive and can significantly reduce NiFi performance. However, if it is `false`, there could be the potential for data loss if either there is a sudden power loss or the operating system crashes. The default value is `false`.
 |====
@@ -2702,10 +2743,6 @@ available again. These properties govern how that process occurs.
 |*Property*|*Description*
 |`nifi.swap.manager.implementation`|The Swap Manager implementation. The default value is `org.apache.nifi.controller.FileSystemSwapManager` and should not be changed.
 |`nifi.queue.swap.threshold`|The queue threshold at which NiFi starts to swap FlowFile information to disk. The default value is `20000`.
-|`nifi.swap.in.period`|The swap in period. The default value is `5 sec`.
-|`nifi.swap.in.threads`|The number of threads to use for swapping in. The default value is `1`.
-|`nifi.swap.out.period`|The swap out period. The default value is `5 sec`.
-|`nifi.swap.out.threads`|The number of threads to use for swapping out. The default value is `4`.
 |====
 
 === Content Repository
@@ -2727,7 +2764,6 @@ FlowFile Repository, if also on that disk, could become corrupt. To avoid this s
 |*Property*|*Description*
 |`nifi.content.repository.implementation`|The Content Repository implementation. The default value is `org.apache.nifi.controller.repository.FileSystemRepository` and should only be changed with caution. To store flowfile content in memory instead of on disk (at the risk of data loss in the event of power/machine failure), set this property to `org.apache.nifi.controller.repository.VolatileContentRepository`.
 |`nifi.content.claim.max.appendable.size`|The maximum size for a content claim. The default value is `1 MB`.
-|`nifi.content.claim.max.flow.files`|The maximum number of FlowFiles to assign to one content claim. The default value is `100`.
 |`nifi.content.repository.directory.default`*|The location of the Content Repository. The default value is `./content_repository`. +
  +
 *NOTE*: Multiple content repositories can be specified by using the `nifi.content.repository.directory.` prefix with unique suffixes and separate paths as values. +
@@ -2826,12 +2862,9 @@ the `WriteAheadProvenanceRepository`, it cannot be changed back to the `Persiste
 	Providing three total locations, including `nifi.provenance.repository.directory.default`.
 |`nifi.provenance.repository.max.storage.time`|The maximum amount of time to keep data provenance information. The default value is `24 hours`.
 |`nifi.provenance.repository.max.storage.size`|The maximum amount of data provenance information to store at a time.
-	The default value is `1 GB`. The Data Provenance capability can consume a great deal of storage space because so much data is kept.
+	The default value is `10 GB`. The Data Provenance capability can consume a great deal of storage space because so much data is kept.
 	For production environments, values of 1-2 TB or more is not uncommon. The repository will write to a single "event file" (or set of
-	"event files" if multiple storage locations are defined, as described above) for some period of time (defined by the
-	`nifi.provenance.repository.rollover.time` and `nifi.provenance.repository.rollover.size` properties). Data is always aged off one file at a time,
-	so it is not advisable to write to a single "event file" for a tremendous amount of time, as it will prevent old data from aging off as smoothly.
-|`nifi.provenance.repository.rollover.time`|The amount of time to wait before rolling over the "event file" that the repository is writing to.
+	"event files" if multiple storage locations are defined, as described above) until the event file reaches the size defined in the `nifi.provenance.repository.rollover.size` property. It will then "roll over" and begin writing new events to a new file. Data is always aged off one file at a time, so it is not advisable to write a tremendous amount of data to a single "event file," as it will prevent old data from aging off as smoothly.
 |`nifi.provenance.repository.rollover.size`|The amount of data to write to a single "event file." The default value is `100 MB`. For production
 	environments where a very large amount of Data Provenance is generated, a value of `1 GB` is also very reasonable.
 |`nifi.provenance.repository.query.threads`|The number of threads to use for Provenance Repository queries. The default value is `2`.
@@ -2882,7 +2915,6 @@ All of the properties defined above (see <<write-ahead-provenance-repository-pro
 
 |====
 |*Property*|*Description*
-|`nifi.provenance.repository.debug.frequency`|Controls the number of events processed between DEBUG statements documenting the performance metrics of the repository. This value is only used when DEBUG level statements are enabled in the log configuration.
  |`nifi.provenance.repository.encryption.key.provider.implementation`|This is the fully-qualified class name of the **key provider**. A key provider is the datastore interface for accessing the encryption key to protect the provenance events. There are currently two implementations -- `StaticKeyProvider` which reads a key directly from _nifi.properties_, and `FileBasedKeyProvider` which reads *n* many keys from an encrypted file. The interface is extensible, and HSM-backed or other providers are expected in the future.
  |`nifi.provenance.repository.encryption.key.provider.location`|The path to the key definition resource (empty for `StaticKeyProvider`, `./keys.nkp` or similar path for `FileBasedKeyProvider`). For future providers like an HSM, this may be a connection string or URL.
  |`nifi.provenance.repository.encryption.key.id`|The active key ID to use for encryption (e.g. `Key1`).
@@ -2894,7 +2926,6 @@ The simplest configuration is below:
 
 ....
 nifi.provenance.repository.implementation=org.apache.nifi.provenance.EncryptedWriteAheadProvenanceRepository
-nifi.provenance.repository.debug.frequency=100
 nifi.provenance.repository.encryption.key.provider.implementation=org.apache.nifi.security.kms.StaticKeyProvider
 nifi.provenance.repository.encryption.key.provider.location=
 nifi.provenance.repository.encryption.key.id=Key1
@@ -2917,7 +2948,7 @@ For example, to provide two additional locations to act as part of the provenanc
  +
 Providing three total locations, including `nifi.provenance.repository.directory.default`.
 |`nifi.provenance.repository.max.storage.time`|The maximum amount of time to keep data provenance information. The default value is `24 hours`.
-|`nifi.provenance.repository.max.storage.size`|The maximum amount of data provenance information to store at a time. The default value is `1 GB`.
+|`nifi.provenance.repository.max.storage.size`|The maximum amount of data provenance information to store at a time. The default value is `10 GB`.
 |`nifi.provenance.repository.rollover.time`|The amount of time to wait before rolling over the latest data provenance information so that it is available in the User Interface. The default value is `30 secs`.
 |`nifi.provenance.repository.rollover.size`|The amount of information to roll over at a time. The default value is `100 MB`.
 |`nifi.provenance.repository.query.threads`|The number of threads to use for Provenance Repository queries. The default value is `2`.
@@ -3240,7 +3271,6 @@ These properties pertain to the web-based User Interface.
 
 |====
 |*Property*|*Description*
-|`nifi.web.war.directory`|This is the location of the web war directory. The default value is `./lib`.
 |`nifi.web.http.host`|The HTTP host. It is blank by default.
 |`nifi.web.http.port`|The HTTP port. The default value is `8080`.
 |`nifi.web.http.port.forwarding`|The port which forwards incoming HTTP requests to `nifi.web.http.host`. This property is designed to be used with 'port forwarding', when NiFi has to be started by a non-root user for better security, yet it needs to be accessed via low port to go through a firewall. For example, to expose NiFi via HTTP protocol on port 80, but actually listening on port 8080, you need to configure OS level port forwarding such as `iptables` (Linux/Unix) or `pfctl` (OS X) that redirects requests from 80 to 8080. Then set `nifi.web.http.port` as 8080, and `nifi.web.http.port.forwarding` as 80. It is blank by default.
@@ -3377,7 +3407,7 @@ to the cluster. It provides an additional layer of security. This value is blank
 long time before starting processing if we reach at least this number of nodes in the cluster.
 |`nifi.cluster.load.balance.port`|Specifies the port to listen on for incoming connections for load balancing data across the cluster. The default value is `6342`.
 |`nifi.cluster.load.balance.host`|Specifies the hostname to listen on for incoming connections for load balancing data across the cluster. If not specified, will default to the value used by the `nifi.cluster.node.address` property.
-|`nifi.cluster.load.balance.connections.per.node`|The maximum number of connections to create between this node and each other node in the cluster. For example, if there are 5 nodes in the cluster and this value is set to 4, there will be up to 20 socket connections established for load-balancing purposes (5 x 4 = 20). The default value is `4`.
+|`nifi.cluster.load.balance.connections.per.node`|The maximum number of connections to create between this node and each other node in the cluster. For example, if there are 5 nodes in the cluster and this value is set to 4, there will be up to 20 socket connections established for load-balancing purposes (5 x 4 = 20). The default value is `1`.
 |`nifi.cluster.load.balance.max.thread.count`|The maximum number of threads to use for transferring data from this node to other nodes in the cluster. While a given thread can only write to a single socket at a time, a single thread is capable of servicing multiple connections simultaneously because a given connection may not be available for reading/writing at any given time. The default value is `8`—i.e., up to 8 threads will be responsible for transferring data to other nodes, regardless of how many nodes are in the cluster.
 
 *NOTE:* Increasing this value will allow additional threads to be used for communicating with other nodes in the cluster and writing the data to the Content and FlowFile Repositories. However, if this property is set to a value greater than the number of nodes in the cluster multiplied by the number of connections per node (`nifi.cluster.load.balance.connections.per.node`), then no further benefit will be gained and resources will be wasted.
@@ -3646,3 +3676,65 @@ In your new NiFi installation:
 3. After confirming your new NiFi instances are stable and working as expected, the old installation can be removed.
 
 NOTE:  If the original NiFi was setup to run as a service, update any symlinks or service scripts to point to the new NiFi version executables.
+
+
+== Processor Locations
+
+[[processor-location-options]]
+=== Available Configuration Options
+
+NiFi provides 3 configuration options for processor locations. Namely:
+
+   nifi.nar.library.directory
+   nifi.nar.library.directory.<custom>
+   nifi.nar.library.autoload.directory
+
+NOTE: Paths set using these options are relative to the NiFi Home Directory. For example, if the NiFi Home Directory is `/var/lib/nifi`, and the Library Directory is `./lib`, then the final path is `/var/lib/nifi/lib`.
+
+The `nifi.nar.library.directory` is used for the default location for provided NiFi processors. It is not recommended to use this for custom processors as these could be lost during a NiFi upgrade. For example:
+
+   nifi.nar.library.directory=./lib
+
+The `nifi.nar.library.directory.<custom>` allows the admin to provide multiple arbritary paths for NiFi to locate custom processors. A unique property identifier must append the property for each unique path. For example:
+
+   nifi.nar.library.directory.myCustomLibs=./my-custom-nars/lib
+   nifi.nar.library.directory.otherCustomLibs=./other-custom-nars/lib
+
+The `nifi.nar.library.autoload.directory` is used by the autoload feature, where NiFi can automatically load new processors added to the configured path without requiring a restart. For example:
+
+   nifi.nar.library.autoload.directory=./autoload/lib
+
+=== Installing Custom Processors
+
+This section describes the original process for installing custom processors that requires a restart to NiFi. To use the Autoloading feature, see the below <<autoloading-processors>> section.
+
+Firstly, we will configure a directory for the custom processors. See <<processor-location-options>> for more about these configuration options.
+
+   nifi.nar.library.directory.myCustomLibs=./my-custom-nars/lib
+ 
+Ensure that this directory exists and has appropriate permissions for the nifi user and group.
+
+Now, we must place our custom processor nar in the configured directory. The configured directory is relative to the NiFi Home directory; for example, let us say that our NiFi Home Dir is `/var/lib/nifi`, we would place our custom processor nar in `/var/lib/nifi/my-custom-nars/lib`.
+
+Ensure that the file has appropriate permissions for the nifi user and group.
+
+Restart NiFi and the custom processor should now be available when adding a new Processor to your flow.
+
+[[autoloading-processors]]
+=== Autoloading Custom Processors
+
+This section describes the process to use the Autoloading feature for custom processors.
+
+To use the autoloading feature, the `nifi.nar.library.autoload.directory` property must be configured to point at the desired directory. By default, this points at `./extensions`. 
+
+For example:
+
+   nifi.nar.library.autoload.directory=./extensions
+
+Ensure that this directory exists and has appropriate permissions for the nifi user and group.
+
+Now, we must place our custom processor nar in the configured directory. The configured directory is relative to the NiFi Home directory; for example, let us say that our NiFi Home Dir is `/var/lib/nifi`, we would place our custom processor nar in `/var/lib/nifi/extensions`.
+
+Ensure that the file has appropriate permissions for the nifi user and group.
+
+Refresh the browser page and the custom processor should now be available when adding a new Processor to your flow.

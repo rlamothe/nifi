@@ -114,7 +114,6 @@ import org.apache.nifi.controller.reporting.ReportingTaskInstantiationException;
 import org.apache.nifi.controller.reporting.ReportingTaskProvider;
 import org.apache.nifi.controller.repository.ContentRepository;
 import org.apache.nifi.controller.repository.CounterRepository;
-import org.apache.nifi.controller.repository.EncryptedRepositoryRecordSerdeFactory;
 import org.apache.nifi.controller.repository.FlowFileEventRepository;
 import org.apache.nifi.controller.repository.FlowFileRecord;
 import org.apache.nifi.controller.repository.FlowFileRepository;
@@ -127,7 +126,6 @@ import org.apache.nifi.controller.repository.StandardQueueProvider;
 import org.apache.nifi.controller.repository.StandardRepositoryRecord;
 import org.apache.nifi.controller.repository.SwapManagerInitializationContext;
 import org.apache.nifi.controller.repository.SwapSummary;
-import org.apache.nifi.controller.repository.WriteAheadFlowFileRepository;
 import org.apache.nifi.controller.repository.claim.ContentClaim;
 import org.apache.nifi.controller.repository.claim.ContentDirection;
 import org.apache.nifi.controller.repository.claim.ResourceClaim;
@@ -151,6 +149,8 @@ import org.apache.nifi.controller.service.StandardConfigurationContext;
 import org.apache.nifi.controller.service.StandardControllerServiceProvider;
 import org.apache.nifi.controller.state.manager.StandardStateManagerProvider;
 import org.apache.nifi.controller.state.server.ZooKeeperStateServer;
+import org.apache.nifi.controller.status.NodeStatus;
+import org.apache.nifi.controller.status.StorageStatus;
 import org.apache.nifi.controller.status.analytics.CachingConnectionStatusAnalyticsEngine;
 import org.apache.nifi.controller.status.analytics.ConnectionStatusAnalytics;
 import org.apache.nifi.controller.status.analytics.StatusAnalyticsEngine;
@@ -161,6 +161,7 @@ import org.apache.nifi.controller.status.history.GarbageCollectionStatus;
 import org.apache.nifi.controller.status.history.StandardGarbageCollectionStatus;
 import org.apache.nifi.controller.status.history.StatusHistoryUtil;
 import org.apache.nifi.controller.tasks.ExpireFlowFiles;
+import org.apache.nifi.diagnostics.StorageUsage;
 import org.apache.nifi.diagnostics.SystemDiagnostics;
 import org.apache.nifi.diagnostics.SystemDiagnosticsFactory;
 import org.apache.nifi.encrypt.StringEncryptor;
@@ -208,6 +209,7 @@ import org.apache.nifi.reporting.StandardEventAccess;
 import org.apache.nifi.reporting.UserAwareEventAccess;
 import org.apache.nifi.scheduling.SchedulingStrategy;
 import org.apache.nifi.security.util.SslContextFactory;
+import org.apache.nifi.security.util.StandardTlsConfiguration;
 import org.apache.nifi.security.util.TlsConfiguration;
 import org.apache.nifi.security.util.TlsException;
 import org.apache.nifi.services.FlowService;
@@ -218,7 +220,6 @@ import org.apache.nifi.util.FormatUtils;
 import org.apache.nifi.util.NiFiProperties;
 import org.apache.nifi.util.ReflectionUtils;
 import org.apache.nifi.util.concurrency.TimedLock;
-import org.apache.nifi.wali.EncryptedSequentialAccessWriteAheadLog;
 import org.apache.nifi.web.api.dto.PositionDTO;
 import org.apache.nifi.web.api.dto.status.StatusHistoryDTO;
 import org.apache.zookeeper.server.quorum.QuorumPeerConfig.ConfigException;
@@ -286,7 +287,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
     private final ConcurrentMap<String, Port> allOutputPorts = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Funnel> allFunnels = new ConcurrentHashMap<>();
 
-    private volatile ZooKeeperStateServer zooKeeperStateServer;
+    private final ZooKeeperStateServer zooKeeperStateServer;
 
     // The Heartbeat Bean is used to provide an Atomic Reference to data that is used in heartbeats that may
     // change while the instance is running. We do this because we want to generate heartbeats even if we
@@ -468,7 +469,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
 
         try {
             // Form the container object from the properties
-            TlsConfiguration tlsConfiguration = TlsConfiguration.fromNiFiProperties(nifiProperties);
+            TlsConfiguration tlsConfiguration = StandardTlsConfiguration.fromNiFiProperties(nifiProperties);
             this.sslContext = SslContextFactory.createSslContext(tlsConfiguration);
         } catch (TlsException e) {
             LOG.error("Unable to start the flow controller because the TLS configuration was invalid: {}", e.getLocalizedMessage());
@@ -692,7 +693,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             @Override
             public void run() {
                 try {
-                    componentStatusRepository.capture(eventAccess.getControllerStatus(), getGarbageCollectionStatus());
+                    componentStatusRepository.capture(getNodeStatusSnapshot(), eventAccess.getControllerStatus(), getGarbageCollectionStatus());
                 } catch (final Exception e) {
                     LOG.error("Failed to capture component stats for Stats History", e);
                 }
@@ -787,18 +788,11 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
         }
 
         try {
-            final FlowFileRepository created = NarThreadContextClassLoader.createInstance(extensionManager, implementationClassName,
-                    FlowFileRepository.class, properties);
-            if (EncryptedSequentialAccessWriteAheadLog.class.getName().equals(properties.getProperty(NiFiProperties.FLOWFILE_REPOSITORY_WAL_IMPLEMENTATION))
-                    && created instanceof WriteAheadFlowFileRepository) {
-                synchronized (created) {
-                    ((WriteAheadFlowFileRepository) created).initialize(contentClaimManager, new EncryptedRepositoryRecordSerdeFactory(contentClaimManager, properties));
-                }
-            } else {
-                synchronized (created) {
-                    created.initialize(contentClaimManager);
-                }
+            final FlowFileRepository created = NarThreadContextClassLoader.createInstance(extensionManager, implementationClassName, FlowFileRepository.class, properties);
+            synchronized (created) {
+                created.initialize(contentClaimManager);
             }
+
             return created;
         } catch (final Exception e) {
             throw new RuntimeException(e);
@@ -1438,7 +1432,7 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
             }
 
             flowSynchronized.set(true);
-            LOG.info("Successfully synchronized controller with proposed flow");
+            LOG.info("Successfully synchronized controller with proposed flow. Flow contains the following number of components: {}", flowManager.getComponentCounts());
         } finally {
             writeLock.unlock("synchronize");
         }
@@ -2972,6 +2966,45 @@ public class FlowController implements ReportingTaskProvider, Authorizable, Node
 
     public StatusHistoryDTO getRemoteProcessGroupStatusHistory(final String remoteGroupId, final Date startTime, final Date endTime, final int preferredDataPoints) {
         return StatusHistoryUtil.createStatusHistoryDTO(componentStatusRepository.getRemoteProcessGroupStatusHistory(remoteGroupId, startTime, endTime, preferredDataPoints));
+    }
+
+    public StatusHistoryDTO getNodeStatusHistory() {
+        return StatusHistoryUtil.createStatusHistoryDTO(componentStatusRepository.getNodeStatusHistory());
+    }
+
+    private NodeStatus getNodeStatusSnapshot() {
+        final SystemDiagnostics systemDiagnostics = getSystemDiagnostics();
+        final NodeStatus result = new NodeStatus();
+
+        result.setCreatedAtInMs(systemDiagnostics.getCreationTimestamp());
+        result.setFreeHeap(systemDiagnostics.getFreeHeap());
+        result.setUsedHeap(systemDiagnostics.getUsedHeap());
+        result.setHeapUtilization(systemDiagnostics.getHeapUtilization());
+        result.setFreeNonHeap(systemDiagnostics.getFreeNonHeap());
+        result.setUsedNonHeap(systemDiagnostics.getUsedNonHeap());
+        result.setOpenFileHandlers(systemDiagnostics.getOpenFileHandles());
+        result.setProcessorLoadAverage(systemDiagnostics.getProcessorLoadAverage());
+        result.setTotalThreads(systemDiagnostics.getTotalThreads());
+        result.setEventDrivenThreads(getActiveEventDrivenThreadCount());
+        result.setTimerDrivenThreads(getActiveTimerDrivenThreadCount());
+        result.setFlowFileRepositoryFreeSpace(systemDiagnostics.getFlowFileRepositoryStorageUsage().getFreeSpace());
+        result.setFlowFileRepositoryUsedSpace(systemDiagnostics.getFlowFileRepositoryStorageUsage().getUsedSpace());
+        result.setContentRepositories(systemDiagnostics.getContentRepositoryStorageUsage().entrySet().stream().map(e -> getStorageStatus(e)).collect(Collectors.toList()));
+        result.setProvenanceRepositories(systemDiagnostics.getProvenanceRepositoryStorageUsage().entrySet().stream().map(e -> getStorageStatus(e)).collect(Collectors.toList()));
+
+        return result;
+    }
+
+    private static StorageStatus getStorageStatus(final Map.Entry<String, StorageUsage> storageUsage) {
+        final StorageStatus result = new StorageStatus();
+        result.setName(storageUsage.getKey());
+        result.setFreeSpace(storageUsage.getValue().getFreeSpace());
+        result.setUsedSpace(storageUsage.getValue().getUsedSpace());
+        return result;
+    }
+
+    public FlowFileEventRepository getFlowFileEventRepository() {
+        return flowFileEventRepository;
     }
 
     private static class HeartbeatBean {

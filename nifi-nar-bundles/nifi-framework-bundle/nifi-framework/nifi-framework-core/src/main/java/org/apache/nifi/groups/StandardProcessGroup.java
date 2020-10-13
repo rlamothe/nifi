@@ -56,9 +56,13 @@ import org.apache.nifi.controller.exception.ComponentLifeCycleException;
 import org.apache.nifi.controller.exception.ProcessorInstantiationException;
 import org.apache.nifi.controller.flow.FlowManager;
 import org.apache.nifi.controller.label.Label;
+import org.apache.nifi.controller.queue.DropFlowFileRequest;
+import org.apache.nifi.controller.queue.DropFlowFileState;
+import org.apache.nifi.controller.queue.DropFlowFileStatus;
 import org.apache.nifi.controller.queue.FlowFileQueue;
 import org.apache.nifi.controller.queue.LoadBalanceCompression;
 import org.apache.nifi.controller.queue.LoadBalanceStrategy;
+import org.apache.nifi.controller.queue.QueueSize;
 import org.apache.nifi.controller.scheduling.StandardProcessScheduler;
 import org.apache.nifi.controller.service.ControllerServiceNode;
 import org.apache.nifi.controller.service.ControllerServiceProvider;
@@ -143,6 +147,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -155,6 +160,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -166,6 +172,13 @@ import java.util.stream.Collectors;
 import static java.util.Objects.requireNonNull;
 
 public final class StandardProcessGroup implements ProcessGroup {
+    public static final List<DropFlowFileState> AGGREGATE_DROP_FLOW_FILE_STATE_PRECEDENCES = Arrays.asList(
+        DropFlowFileState.FAILURE,
+        DropFlowFileState.CANCELED,
+        DropFlowFileState.DROPPING_FLOWFILES,
+        DropFlowFileState.WAITING_FOR_LOCK,
+        DropFlowFileState.COMPLETE
+    );
 
     private final String id;
     private final AtomicReference<ProcessGroup> parent;
@@ -465,6 +478,7 @@ public final class StandardProcessGroup implements ProcessGroup {
     public void startProcessing() {
         readLock.lock();
         try {
+            enableAllControllerServices();
             findAllProcessors().stream().filter(START_PROCESSORS_FILTER).forEach(node -> {
                 try {
                     node.getProcessGroup().startProcessor(node, true);
@@ -1260,6 +1274,87 @@ public final class StandardProcessGroup implements ProcessGroup {
         return findAllConnections(this);
     }
 
+    @Override
+    public DropFlowFileStatus dropAllFlowFiles(String requestIdentifier, String requestor) {
+        return handleDropAllFlowFiles(requestIdentifier, queue -> queue.dropFlowFiles(requestIdentifier, requestor));
+    }
+
+    @Override
+    public DropFlowFileStatus getDropAllFlowFilesStatus(String requestIdentifier) {
+        return handleDropAllFlowFiles(requestIdentifier, queue -> queue.getDropFlowFileStatus(requestIdentifier));
+    }
+
+    @Override
+    public DropFlowFileStatus cancelDropAllFlowFiles(String requestIdentifier) {
+        return handleDropAllFlowFiles(requestIdentifier, queue -> queue.cancelDropFlowFileRequest(requestIdentifier));
+    }
+
+    private DropFlowFileStatus handleDropAllFlowFiles(String dropRequestId, Function<FlowFileQueue, DropFlowFileStatus> function) {
+        DropFlowFileStatus resultDropFlowFileStatus;
+
+        List<Connection> connections = findAllConnections(this);
+
+        DropFlowFileRequest aggregateDropFlowFileStatus = new DropFlowFileRequest(dropRequestId);
+        aggregateDropFlowFileStatus.setState(null);
+
+        AtomicBoolean processedAtLeastOne = new AtomicBoolean(false);
+
+        connections.stream()
+            .map(Connection::getFlowFileQueue)
+            .map(function::apply)
+            .forEach(additionalDropFlowFileStatus -> {
+                aggregate(aggregateDropFlowFileStatus, additionalDropFlowFileStatus);
+                processedAtLeastOne.set(true);
+            });
+
+        if (processedAtLeastOne.get()) {
+            resultDropFlowFileStatus = aggregateDropFlowFileStatus;
+        } else {
+            resultDropFlowFileStatus = null;
+        }
+
+        return resultDropFlowFileStatus;
+    }
+
+    private void aggregate(DropFlowFileRequest aggregateDropFlowFileStatus, DropFlowFileStatus additionalDropFlowFileStatus) {
+        QueueSize aggregateOriginalSize = aggregate(aggregateDropFlowFileStatus.getOriginalSize(), additionalDropFlowFileStatus.getOriginalSize());
+        QueueSize aggregateDroppedSize = aggregate(aggregateDropFlowFileStatus.getDroppedSize(), additionalDropFlowFileStatus.getDroppedSize());
+        QueueSize aggregateCurrentSize = aggregate(aggregateDropFlowFileStatus.getCurrentSize(), additionalDropFlowFileStatus.getCurrentSize());
+        DropFlowFileState aggregateState = aggregate(aggregateDropFlowFileStatus.getState(), additionalDropFlowFileStatus.getState());
+
+        aggregateDropFlowFileStatus.setOriginalSize(aggregateOriginalSize);
+        aggregateDropFlowFileStatus.setDroppedSize(aggregateDroppedSize);
+        aggregateDropFlowFileStatus.setCurrentSize(aggregateCurrentSize);
+        aggregateDropFlowFileStatus.setState(aggregateState);
+    }
+
+    private QueueSize aggregate(QueueSize size1, QueueSize size2) {
+        int objectsNr = Optional.ofNullable(size1)
+            .map(size -> size.getObjectCount() + size2.getObjectCount())
+            .orElse(size2.getObjectCount());
+
+        long sizeByte = Optional.ofNullable(size1)
+            .map(size -> size.getByteCount() + size2.getByteCount())
+            .orElse(size2.getByteCount());
+
+        QueueSize aggregateSize = new QueueSize(objectsNr, sizeByte);
+
+        return aggregateSize;
+    }
+
+    private DropFlowFileState aggregate(DropFlowFileState state1, DropFlowFileState state2) {
+        DropFlowFileState aggregateState = DropFlowFileState.DROPPING_FLOWFILES;
+
+        for (DropFlowFileState aggregateDropFlowFileStatePrecedence : AGGREGATE_DROP_FLOW_FILE_STATE_PRECEDENCES) {
+            if (state1 == aggregateDropFlowFileStatePrecedence || state2 == aggregateDropFlowFileStatePrecedence) {
+                aggregateState = aggregateDropFlowFileStatePrecedence;
+                break;
+            }
+        }
+
+        return aggregateState;
+    }
+
     private List<Connection> findAllConnections(final ProcessGroup group) {
         final List<Connection> connections = new ArrayList<>(group.getConnections());
         for (final ProcessGroup childGroup : group.getProcessGroups()) {
@@ -1586,6 +1681,17 @@ public final class StandardProcessGroup implements ProcessGroup {
             scheduler.enableProcessor(processor);
         } finally {
             readLock.unlock();
+        }
+    }
+
+    @Override
+    public void enableAllControllerServices() {
+        // Enable all valid controller services in this process group
+        controllerServiceProvider.enableControllerServices(controllerServices.values());
+
+        // Enable all controller services for child process groups
+        for(ProcessGroup pg : processGroups.values()) {
+            pg.enableAllControllerServices();
         }
     }
 
@@ -3438,6 +3544,8 @@ public final class StandardProcessGroup implements ProcessGroup {
         copy.setGroupIdentifier(processGroup.getGroupIdentifier());
         copy.setIdentifier(processGroup.getIdentifier());
         copy.setName(processGroup.getName());
+        copy.setFlowFileConcurrency(processGroup.getFlowFileConcurrency());
+        copy.setFlowFileOutboundPolicy(processGroup.getFlowFileOutboundPolicy());
         copy.setPosition(processGroup.getPosition());
         copy.setVersionedFlowCoordinates(topLevel ? null : processGroup.getVersionedFlowCoordinates());
         copy.setConnections(processGroup.getConnections());
@@ -3790,6 +3898,14 @@ public final class StandardProcessGroup implements ProcessGroup {
 
         updateParameterContext(group, proposed, versionedParameterContexts, componentIdSeed);
         updateVariableRegistry(group, proposed, variablesToSkip);
+
+        final FlowFileConcurrency flowFileConcurrency = proposed.getFlowFileConcurrency() == null ? FlowFileConcurrency.UNBOUNDED :
+            FlowFileConcurrency.valueOf(proposed.getFlowFileConcurrency());
+        group.setFlowFileConcurrency(flowFileConcurrency);
+
+        final FlowFileOutboundPolicy outboundPolicy = proposed.getFlowFileOutboundPolicy() == null ? FlowFileOutboundPolicy.STREAM_WHEN_AVAILABLE :
+            FlowFileOutboundPolicy.valueOf(proposed.getFlowFileOutboundPolicy());
+        group.setFlowFileOutboundPolicy(outboundPolicy);
 
         final VersionedFlowCoordinates remoteCoordinates = proposed.getVersionedFlowCoordinates();
         if (remoteCoordinates == null) {
@@ -4201,7 +4317,7 @@ public final class StandardProcessGroup implements ProcessGroup {
             return  childSnapshot.getParameterContexts();
         } catch (final NiFiRegistryException e) {
             throw new IllegalArgumentException("The Flow Registry with ID " + registryId + " reports that no Flow exists with Bucket "
-                    + bucketId + ", Flow " + flowId + ", Version " + flowVersion);
+                    + bucketId + ", Flow " + flowId + ", Version " + flowVersion, e);
         } catch (final IOException ioe) {
             throw new IllegalStateException(
                     "Failed to communicate with Flow Registry when attempting to retrieve a versioned flow");
@@ -4262,6 +4378,13 @@ public final class StandardProcessGroup implements ProcessGroup {
             if (currentParamContext == null) {
                 // Create a new Parameter Context based on the parameters provided
                 final VersionedParameterContext versionedParameterContext = versionedParameterContexts.get(proposedParameterContextName);
+
+                // Protect against NPE in the event somehow the proposed name is not in the set of contexts
+                if (versionedParameterContext == null) {
+                    final String paramContextNames = StringUtils.join(versionedParameterContexts.keySet());
+                    throw new IllegalStateException("Proposed parameter context name '" + proposedParameterContextName
+                            + "' does not exist in set of available parameter contexts [" + paramContextNames + "]");
+                }
 
                 final ParameterContext contextByName = getParameterContextByName(versionedParameterContext.getName());
                 final ParameterContext selectedParameterContext;

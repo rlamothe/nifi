@@ -23,14 +23,15 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import javax.net.ssl.SSLContext;
+import org.apache.http.client.utils.URIBuilder;
 import org.apache.nifi.security.util.SslContextFactory;
-import org.apache.nifi.security.util.TlsConfiguration;
+import org.apache.nifi.security.util.StandardTlsConfiguration;
 import org.apache.nifi.security.util.TlsException;
 import org.apache.nifi.util.NiFiProperties;
 
 public class StandardFlowRegistryClient implements FlowRegistryClient {
     private NiFiProperties nifiProperties;
-    private ConcurrentMap<String, FlowRegistry> registryById = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, FlowRegistry> registryById = new ConcurrentHashMap<>();
 
     @Override
     public FlowRegistry getFlowRegistry(String registryId) {
@@ -61,7 +62,8 @@ public class StandardFlowRegistryClient implements FlowRegistryClient {
     public FlowRegistry addFlowRegistry(final String registryId, final String registryName, final String registryUrl, final String description) {
         final URI uri;
         try {
-            uri = new URI(registryUrl);
+            // Handles case where the URI entered has a trailing slash, or includes the trailing /nifi-registry-api
+            uri = new URIBuilder(registryUrl).setPath("").removeQuery().build();
         } catch (URISyntaxException e) {
             throw new IllegalArgumentException("The given Registry URL is not valid: " + registryUrl);
         }
@@ -71,13 +73,12 @@ public class StandardFlowRegistryClient implements FlowRegistryClient {
             throw new IllegalArgumentException("The given Registry URL is not valid: " + registryUrl);
         }
 
-        // Handles case where the URI entered has a trailing slash, or includes the trailing /nifi-registry-api
-        final String registryBaseUrl = uri.getScheme() + "://" + uri.getHost() + ":" + uri.getPort();
+        final String registryBaseUrl = uri.toString();
 
         final FlowRegistry registry;
         if (uriScheme.equalsIgnoreCase("http") || uriScheme.equalsIgnoreCase("https")) {
             try {
-                final SSLContext sslContext = SslContextFactory.createSslContext(TlsConfiguration.fromNiFiProperties(nifiProperties));
+                final SSLContext sslContext = SslContextFactory.createSslContext(StandardTlsConfiguration.fromNiFiProperties(nifiProperties));
 
                 if (sslContext == null && uriScheme.equalsIgnoreCase("https")) {
                     throw new IllegalStateException("Failed to create Flow Registry for URI " + registryUrl
