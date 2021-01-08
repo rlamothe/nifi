@@ -93,7 +93,7 @@
         <jetty.version>9.4.26.v20200117</jetty.version>
         <jackson.version>2.9.10</jackson.version>
         <jackson-databind.version>2.9.10.5</jackson-databind.version>
-        <nifi.registry.version>0.7.0</nifi.registry.version>
+        <nifi.registry.version>0.8.0</nifi.registry.version>
         <nifi.groovy.version>2.5.4</nifi.groovy.version>
         <surefire.version>2.22.2</surefire.version>
         <!-- The Hadoop version used by nifi-hadoop-libraries-nar and any NARs that depend on it, other NARs that need
@@ -101,6 +101,7 @@
         <hadoop.version>3.2.1</hadoop.version>
         <ozone.version>1.0.0</ozone.version>
         <gcs.version>2.1.5</gcs.version>
+        <aspectj.version>1.9.6</aspectj.version>
     </properties>
 
     <repositories>
@@ -354,6 +355,16 @@
                 <artifactId>apache-jstl</artifactId>
                 <version>${jetty.version}</version>
                 <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.aspectj</groupId>
+                <artifactId>aspectjrt</artifactId>
+                <version>${aspectj.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.aspectj</groupId>
+                <artifactId>aspectjweaver</artifactId>
+                <version>${aspectj.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -614,6 +625,7 @@
                                     <failWhenParentIsSnapshot>false</failWhenParentIsSnapshot>
                                     <excludes>
                                         <exclude>org.apache.nifi:*</exclude>
+                                        <exclude>org.apache.nifi.registry:*</exclude>
                                     </excludes>
                                 </requireReleaseDeps>
                             </rules>
