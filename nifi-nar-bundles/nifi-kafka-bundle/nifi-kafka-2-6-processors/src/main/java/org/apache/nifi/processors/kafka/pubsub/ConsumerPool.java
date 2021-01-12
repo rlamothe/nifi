@@ -19,6 +19,8 @@ package org.apache.nifi.processors.kafka.pubsub;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
@@ -32,8 +34,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
@@ -60,6 +62,10 @@ public class ConsumerPool implements Closeable {
     private final Charset headerCharacterSet;
     private final Pattern headerNamePattern;
     private final boolean separateByKey;
+<<<<<<< HEAD
+=======
+    private final int[] partitionsToConsume;
+>>>>>>> upstream/main
     private final AtomicLong consumerCreatedCountRef = new AtomicLong();
     private final AtomicLong consumerClosedCountRef = new AtomicLong();
     private final AtomicLong leasesObtainedCountRef = new AtomicLong();
@@ -97,8 +103,9 @@ public class ConsumerPool implements Closeable {
             final ComponentLog logger,
             final boolean honorTransactions,
             final Charset headerCharacterSet,
-            final Pattern headerNamePattern) {
-        this.pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
+            final Pattern headerNamePattern,
+            final int[] partitionsToConsume) {
+        this.pooledLeases = new LinkedBlockingQueue<>();
         this.maxWaitMillis = maxWaitMillis;
         this.logger = logger;
         this.demarcatorBytes = demarcator;
@@ -114,6 +121,11 @@ public class ConsumerPool implements Closeable {
         this.headerCharacterSet = headerCharacterSet;
         this.headerNamePattern = headerNamePattern;
         this.separateByKey = separateByKey;
+<<<<<<< HEAD
+=======
+        this.partitionsToConsume = partitionsToConsume;
+        enqueueLeases(partitionsToConsume);
+>>>>>>> upstream/main
     }
 
     public ConsumerPool(
@@ -129,8 +141,9 @@ public class ConsumerPool implements Closeable {
             final ComponentLog logger,
             final boolean honorTransactions,
             final Charset headerCharacterSet,
-            final Pattern headerNamePattern) {
-        this.pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
+            final Pattern headerNamePattern,
+            final int[] partitionsToConsume) {
+        this.pooledLeases = new LinkedBlockingQueue<>();
         this.maxWaitMillis = maxWaitMillis;
         this.logger = logger;
         this.demarcatorBytes = demarcator;
@@ -146,6 +159,11 @@ public class ConsumerPool implements Closeable {
         this.headerCharacterSet = headerCharacterSet;
         this.headerNamePattern = headerNamePattern;
         this.separateByKey = separateByKey;
+<<<<<<< HEAD
+=======
+        this.partitionsToConsume = partitionsToConsume;
+        enqueueLeases(partitionsToConsume);
+>>>>>>> upstream/main
     }
 
     public ConsumerPool(
@@ -162,8 +180,14 @@ public class ConsumerPool implements Closeable {
             final Charset headerCharacterSet,
             final Pattern headerNamePattern,
             final boolean separateByKey,
+<<<<<<< HEAD
             final String keyEncoding) {
         this.pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
+=======
+            final String keyEncoding,
+            final int[] partitionsToConsume) {
+        this.pooledLeases = new LinkedBlockingQueue<>();
+>>>>>>> upstream/main
         this.maxWaitMillis = maxWaitMillis;
         this.logger = logger;
         this.demarcatorBytes = null;
@@ -179,6 +203,11 @@ public class ConsumerPool implements Closeable {
         this.headerNamePattern = headerNamePattern;
         this.separateByKey = separateByKey;
         this.keyEncoding = keyEncoding;
+<<<<<<< HEAD
+=======
+        this.partitionsToConsume = partitionsToConsume;
+        enqueueLeases(partitionsToConsume);
+>>>>>>> upstream/main
     }
 
     public ConsumerPool(
@@ -195,8 +224,14 @@ public class ConsumerPool implements Closeable {
             final Charset headerCharacterSet,
             final Pattern headerNamePattern,
             final boolean separateByKey,
+<<<<<<< HEAD
             final String keyEncoding) {
         this.pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
+=======
+            final String keyEncoding,
+            final int[] partitionsToConsume) {
+        this.pooledLeases = new LinkedBlockingQueue<>();
+>>>>>>> upstream/main
         this.maxWaitMillis = maxWaitMillis;
         this.logger = logger;
         this.demarcatorBytes = null;
@@ -212,6 +247,33 @@ public class ConsumerPool implements Closeable {
         this.headerNamePattern = headerNamePattern;
         this.separateByKey = separateByKey;
         this.keyEncoding = keyEncoding;
+<<<<<<< HEAD
+=======
+        this.partitionsToConsume = partitionsToConsume;
+        enqueueLeases(partitionsToConsume);
+    }
+
+    public int getPartitionCount() {
+        // If using regex for topic names, just return -1
+        if (topics == null || topics.isEmpty()) {
+            return -1;
+        }
+
+        int partitionsEachTopic = 0;
+        try (final Consumer<byte[], byte[]> consumer = createKafkaConsumer()) {
+            for (final String topicName : topics) {
+                final List<PartitionInfo> partitionInfos = consumer.partitionsFor(topicName);
+                final int partitionsThisTopic = partitionInfos.size();
+                if (partitionsEachTopic != 0 && partitionsThisTopic != partitionsEachTopic) {
+                    throw new IllegalStateException("The specific topic names do not have the same number of partitions");
+                }
+
+                partitionsEachTopic = partitionsThisTopic;
+            }
+        }
+
+        return partitionsEachTopic;
+>>>>>>> upstream/main
     }
 
     /**
@@ -239,20 +301,50 @@ public class ConsumerPool implements Closeable {
              * sitting idle which could prompt excessive rebalances.
              */
             lease = new SimpleConsumerLease(consumer);
-            /**
-             * This subscription tightly couples the lease to the given
-             * consumer. They cannot be separated from then on.
-             */
-            if (topics != null) {
-              consumer.subscribe(topics, lease);
+
+            if (partitionsToConsume == null) {
+                // This subscription tightly couples the lease to the given
+                // consumer. They cannot be separated from then on.
+                if (topics != null) {
+                    consumer.subscribe(topics, lease);
+                } else {
+                    consumer.subscribe(topicPattern, lease);
+                }
             } else {
-              consumer.subscribe(topicPattern, lease);
+                logger.debug("Cannot obtain lease to communicate with Kafka. Since partitions are explicitly assigned, cannot create a new lease.");
+                return null;
             }
         }
         lease.setProcessSession(session, processContext);
 
         leasesObtainedCountRef.incrementAndGet();
         return lease;
+    }
+
+    private SimpleConsumerLease createConsumerLease(final int partition) {
+        final List<TopicPartition> topicPartitions = new ArrayList<>();
+        for (final String topic : topics) {
+            final TopicPartition topicPartition = new TopicPartition(topic, partition);
+            topicPartitions.add(topicPartition);
+        }
+
+        final Consumer<byte[], byte[]> consumer = createKafkaConsumer();
+        consumerCreatedCountRef.incrementAndGet();
+        consumer.assign(topicPartitions);
+
+        final SimpleConsumerLease lease = new SimpleConsumerLease(consumer);
+        return lease;
+    }
+
+    private void enqueueLeases(final int[] partitionsToConsume) {
+        if (partitionsToConsume == null) {
+            return;
+        }
+
+        for (final int partition : partitionsToConsume) {
+            final SimpleConsumerLease lease = createConsumerLease(partition);
+            pooledLeases.add(lease);
+        }
     }
 
     /**

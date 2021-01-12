@@ -341,6 +341,8 @@ public class StandardOidcIdentityProvider implements OidcIdentityProvider {
         if (!isOidcEnabled()) {
             throw new IllegalStateException(OPEN_ID_CONNECT_SUPPORT_IS_NOT_CONFIGURED);
         }
+<<<<<<< HEAD
+=======
 
         try {
             // Authenticate and authorize the client request
@@ -358,6 +360,31 @@ public class StandardOidcIdentityProvider implements OidcIdentityProvider {
         if (!isOidcEnabled()) {
             throw new IllegalStateException(OPEN_ID_CONNECT_SUPPORT_IS_NOT_CONFIGURED);
         }
+>>>>>>> upstream/main
+
+        try {
+            // Authenticate and authorize the client request
+            final TokenResponse response = authorizeClient(authorizationGrant);
+<<<<<<< HEAD
+            return getAccessTokenString((OIDCTokenResponse) response);
+
+        } catch (final RuntimeException | ParseException | IOException | java.text.ParseException | InvalidHashException e) {
+=======
+            return getIdTokenString((OIDCTokenResponse) response);
+
+        } catch (final RuntimeException | JOSEException | BadJOSEException | ParseException | IOException e) {
+>>>>>>> upstream/main
+            throw new RuntimeException("Unable to parse the response from the Token request: " + e.getMessage(), e);
+        }
+    }
+
+<<<<<<< HEAD
+    @Override
+    public String exchangeAuthorizationCodeForIdToken(final AuthorizationGrant authorizationGrant) {
+        // Check if OIDC is enabled
+        if (!isOidcEnabled()) {
+            throw new IllegalStateException(OPEN_ID_CONNECT_SUPPORT_IS_NOT_CONFIGURED);
+        }
 
         try {
             // Authenticate and authorize the client request
@@ -369,6 +396,8 @@ public class StandardOidcIdentityProvider implements OidcIdentityProvider {
         }
     }
 
+=======
+>>>>>>> upstream/main
     private String getAccessTokenString(final OIDCTokenResponse response) throws Exception {
         final OIDCTokens oidcTokens = getOidcTokens(response);
 
@@ -439,8 +468,16 @@ public class StandardOidcIdentityProvider implements OidcIdentityProvider {
                 identity = claimsSet.getStringClaim(EMAIL_CLAIM);
                 logger.info("The 'email' claim was present. Using that claim to avoid extra remote call");
             } else {
-                identity = retrieveIdentityFromUserInfoEndpoint(oidcTokens);
-                logger.info("Retrieved identity from UserInfo endpoint");
+                final List<String> fallbackClaims = properties.getOidcFallbackClaimsIdentifyingUser();
+                for (String fallbackClaim : fallbackClaims) {
+                    if (availableClaims.contains(fallbackClaim)) {
+                        identity = claimsSet.getStringClaim(fallbackClaim);
+                        break;
+                    }
+                }
+                if (StringUtils.isBlank(identity)) {
+                    identity = retrieveIdentityFromUserInfoEndpoint(oidcTokens);
+                }
             }
         }
 

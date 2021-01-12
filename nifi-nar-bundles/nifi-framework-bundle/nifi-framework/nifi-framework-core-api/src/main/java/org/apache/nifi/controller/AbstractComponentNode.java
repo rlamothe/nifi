@@ -20,16 +20,19 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.attribute.expression.language.StandardPropertyValue;
 import org.apache.nifi.bundle.Bundle;
 import org.apache.nifi.bundle.BundleCoordinate;
+import org.apache.nifi.components.ConfigurableComponent;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.validation.DisabledServiceValidationResult;
+import org.apache.nifi.components.validation.EnablingServiceValidationResult;
 import org.apache.nifi.components.validation.ValidationState;
 import org.apache.nifi.components.validation.ValidationStatus;
 import org.apache.nifi.components.validation.ValidationTrigger;
 import org.apache.nifi.controller.service.ControllerServiceDisabledException;
 import org.apache.nifi.controller.service.ControllerServiceNode;
 import org.apache.nifi.controller.service.ControllerServiceProvider;
+import org.apache.nifi.controller.service.ControllerServiceState;
 import org.apache.nifi.nar.ExtensionManager;
 import org.apache.nifi.nar.NarCloseable;
 import org.apache.nifi.parameter.ExpressionLanguageAgnosticParameterParser;
@@ -641,7 +644,15 @@ public abstract class AbstractComponentNode implements ComponentNode {
         final ParameterContext parameterContext = getParameterContext();
         final boolean assignedToProcessGroup = getProcessGroupIdentifier() != null;
 
+        final ConfigurableComponent component = getComponent();
         for (final PropertyDescriptor propertyDescriptor : validationContext.getProperties().keySet()) {
+            // If the property descriptor's dependency is not satisfied, the property does not need to be considered, as it's not relevant to the
+            // component's functionality.
+            final boolean dependencySatisfied = validationContext.isDependencySatisfied(propertyDescriptor, component::getPropertyDescriptor);
+            if (!dependencySatisfied) {
+                continue;
+            }
+
             final Collection<String> referencedParameters = validationContext.getReferencedParameters(propertyDescriptor.getName());
 
             if (parameterContext == null && !referencedParameters.isEmpty()) {
@@ -714,6 +725,8 @@ public abstract class AbstractComponentNode implements ComponentNode {
 
             if (!controllerServiceNode.isActive()) {
                 validationResults.add(new DisabledServiceValidationResult(descriptor.getDisplayName(), controllerServiceId));
+            } else if (ControllerServiceState.ENABLING == controllerServiceNode.getState()) {
+                validationResults.add(new EnablingServiceValidationResult(descriptor.getDisplayName(), controllerServiceId));
             }
         }
 
@@ -740,13 +753,21 @@ public abstract class AbstractComponentNode implements ComponentNode {
         }
         final BundleCoordinate controllerServiceApiCoordinate = controllerServiceApiBundle.getBundleDetails().getCoordinate();
 
-        final Bundle controllerServiceBundle = extensionManager.getBundle(controllerServiceNode.getBundleCoordinate());
+        Bundle controllerServiceBundle = extensionManager.getBundle(controllerServiceNode.getBundleCoordinate());
+        final boolean matchesApiByBundleCoordinates;
         if (controllerServiceBundle == null) {
-            return createInvalidResult(serviceId, propertyName, "Unable to find bundle for coordinate " + controllerServiceNode.getBundleCoordinate());
-        }
-        final BundleCoordinate controllerServiceCoordinate = controllerServiceBundle.getBundleDetails().getCoordinate();
+            final List<Bundle> possibleBundles = extensionManager.getBundles(controllerServiceNode.getControllerServiceImplementation().getClass().getName());
+            if (possibleBundles.size() != 1) {
+                return createInvalidResult(serviceId, propertyName, "Unable to find bundle for coordinate " + controllerServiceNode.getBundleCoordinate());
+            }
 
-        final boolean matchesApiByBundleCoordinates = matchesApiBundleCoordinates(extensionManager, controllerServiceBundle, controllerServiceApiCoordinate);
+            controllerServiceBundle = possibleBundles.get(0);
+            matchesApiByBundleCoordinates = false;
+        } else {
+            matchesApiByBundleCoordinates = matchesApiBundleCoordinates(extensionManager, controllerServiceBundle, controllerServiceApiCoordinate);
+        }
+
+        final BundleCoordinate controllerServiceCoordinate = controllerServiceBundle.getBundleDetails().getCoordinate();
         if (!matchesApiByBundleCoordinates) {
             final Class<? extends ControllerService> controllerServiceImplClass = controllerServiceNode.getControllerServiceImplementation().getClass();
             logger.debug("Comparing methods from service api '{}' against service implementation '{}'",

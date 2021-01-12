@@ -54,7 +54,7 @@ import java.util.regex.Pattern;
 
 @TriggerWhenEmpty
 @InputRequirement(InputRequirement.Requirement.INPUT_ALLOWED)
-@Tags({"hadoop", "HDFS", "delete", "remove", "filesystem"})
+@Tags({"hadoop", "HCFS", "HDFS", "delete", "remove", "filesystem"})
 @CapabilityDescription("Deletes one or more files or directories from HDFS. The path can be provided as an attribute from an incoming FlowFile, "
         + "or a statically set path that is periodically removed. If this processor has an incoming connection, it"
         + "will ignore running on a periodic basis and instead rely on incoming FlowFiles to trigger a delete. "
@@ -64,7 +64,7 @@ import java.util.regex.Pattern;
         + " knowledge of globbed files deleted is necessary use ListHDFS first to produce a specific list of files to delete. ")
 @Restricted(restrictions = {
     @Restriction(
-        requiredPermission = RequiredPermission.WRITE_FILESYSTEM,
+        requiredPermission = RequiredPermission.WRITE_DISTRIBUTED_FILESYSTEM,
         explanation = "Provides operator the ability to delete any file that NiFi has access to in HDFS or the local filesystem.")
 })
 @WritesAttributes({
